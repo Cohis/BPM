@@ -1,7 +1,9 @@
-const express = require('express')
-const app = express()
-const fs = require('fs')
-const path = require('path')
+const express = require('express');
+const app = express();
+const fs = require('fs');
+const path = require('path');
+const CD = require('content-disposition');
+const contentDisposition = require('content-disposition');
 
 
 
@@ -40,6 +42,26 @@ app.get('/songs/:file', (req, res) => {
     else{
 
         console.log("Song not found :(")
+    }
+
+})
+
+app.get('/songs/:file/download', (req,res) => {
+
+    const song = path.join(__dirname, '/songs/' +req.params.file);
+
+    if(fs.existsSync(song)){
+        const stream = fs.createReadStream(song);
+
+        res.setHeader('Content-Disposition', contentDisposition(req.params.file));
+
+        stream.pipe(res);
+
+        console.log("DEBUG:", song);
+    }
+
+    else{
+        console.log("Song not found :(");
     }
 
 })
