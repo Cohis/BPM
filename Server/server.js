@@ -2,7 +2,6 @@ const express = require('express');
 const app = express();
 const fs = require('fs');
 const path = require('path');
-const CD = require('content-disposition');
 const contentDisposition = require('content-disposition');
 
 
@@ -53,7 +52,7 @@ app.get('/songs/:file/download', (req,res) => {
     if(fs.existsSync(song)){
         const stream = fs.createReadStream(song);
 
-        res.setHeader('Content-Disposition', contentDisposition(req.params.file));
+        res.setHeader('Content-Disposition', `attachment; filename="${req.params.file}"`);
 
         stream.pipe(res);
 
