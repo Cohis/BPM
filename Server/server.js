@@ -1,10 +1,12 @@
+require('dotenv').config()
 const express = require('express');
 const app = express();
 const fs = require('fs');
 const path = require('path');
-const contentDisposition = require('content-disposition');
+const jwt = require('jsonwebtoken');
 
-
+//Welcome to HeartBeat, Hunters!
+//The world is a better place w music! ;)
 
 app.get('/songs', (req, res) => {
 
@@ -17,53 +19,42 @@ app.get('/songs', (req, res) => {
 
 app.get('/songs/:file', (req, res) => {
     
-    //pegar a música com path.join
-    //verificar se ela existe e fazer o stream
-
-    const song = path.join(__dirname, '/songs/' + req.params.file);
-    console.log(req.params);
-
-    if(fs.existsSync(song)){
-
-        //Está entrando no if corretamente
-
-        const stream = fs.createReadStream(song);
-
-        //setamos um Header para que o navegador saiba qual ação tomar
-
-        res.setHeader('Content-Type','audio/mp3');
-
-        stream.pipe(res)
-
-        console.log("DEBUG:", song);
-    }
-
-    else{
-
-        console.log("Song not found :(")
-    }
-
+   streamsong(req.params.file, res)
 })
+
+
 
 app.get('/songs/:file/download', (req,res) => {
 
-    const song = path.join(__dirname, '/songs/' +req.params.file);
+    streamsong(req.params.file, res, true)
+})
 
+
+
+function streamsong(filename, res, download = false){
+
+    //building songpath
+    const song = path.join(__dirname, '/songs/' + filename);
+
+    //verify if the song is available
     if(fs.existsSync(song)){
+
         const stream = fs.createReadStream(song);
 
-        res.setHeader('Content-Disposition', `attachment; filename="${req.params.file}"`);
+        //This is the Header meant for downloading content
+        if(download)
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
-        stream.pipe(res);
+        else
+            res.setHeader('Content-Type', 'audio/mp3');
 
-        console.log("DEBUG:", song);
+
+        stream.pipe(res)
+
     }
 
-    else{
-        console.log("Song not found :(");
-    }
+}
 
-})
 
 
 app.listen(8080, () => {
