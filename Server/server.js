@@ -7,7 +7,8 @@ const jwt = require('jsonwebtoken');
 
 //Welcome to HeartBeat!
 //Without music, the world would be just a rock! ;)
-//Dev by: Murilo Rodrigues Damasceno dos Santos - 2026 
+//Dev by: Murilo Rodrigues Damasceno dos Santos - 2026
+
 
 app.use(express.json()) //activating middleware
 //now, express will read all POST req's body and transform JSON in a Javascript object
