@@ -7,6 +7,8 @@ const jwt = require('jsonwebtoken');
 
 const app = express();
 
+//recriar arquivo do 0 (um dia)
+
 // --- CONFIGURAÇÕES ---
 const PORT = process.env.PORT || 8080;
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -27,7 +29,7 @@ if (!fs.existsSync(SONGS_DIR)) {
 
 // Middlewares
 app.use(express.json());
-app.use(cors()); // libera CORS para desenvolvimento/mobile
+app.use(cors());
 
 // --- RATE LIMITING SIMPLES (memória) ---
 const authAttempts = new Map();
@@ -35,7 +37,7 @@ function rateLimitAuth(req, res, next) {
   const ip = req.ip || req.connection.remoteAddress || 'unknown';
   const now = Date.now();
   const attempts = authAttempts.get(ip) || [];
-  const recent = attempts.filter(t => now - t < 15 * 60 * 1000); // 15 min
+  const recent = attempts.filter(t => now - t < 15 * 60 * 1000);
   if (recent.length >= 10) {
     return res.status(429).json({ error: 'Muitas tentativas. Aguarde 15 minutos.' });
   }
@@ -72,30 +74,185 @@ function authmiddleware(req, res, next) {
   });
 }
 
-// --- LISTAR MÚSICAS ---
-app.get('/songs', authmiddleware, (req, res) => {
+// ============================================
+// NOVAS ROTAS COM ESTRUTURA DE PASTAS
+// ============================================
+
+/**
+ * GET /library
+ * Retorna a biblioteca completa como árvore JSON:
+ * {
+ *   "Deftones": {
+ *     "White Pony": ["Change (In the House of Flies).mp3", "Digital Bath.mp3"],
+ *     "Around the Fur": ["My Own Summer.mp3"]
+ *   },
+ *   "The Strokes": { ... }
+ * }
+ */
+app.get('/library', authmiddleware, (req, res) => {
   try {
-    const files = fs.readdirSync(SONGS_DIR).filter(f => f.endsWith('.mp3'));
-    res.json(files);
+    const library = {};
+    const artists = fs.readdirSync(SONGS_DIR, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+
+    for (const artist of artists) {
+      const artistPath = path.join(SONGS_DIR, artist);
+      const albums = fs.readdirSync(artistPath, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+        .map(d => d.name);
+
+      library[artist] = {};
+
+      for (const album of albums) {
+        const albumPath = path.join(artistPath, album);
+        const files = fs.readdirSync(albumPath)
+          .filter(f => f.endsWith('.mp3'));
+        library[artist][album] = files;
+      }
+    }
+
+    res.json(library);
   } catch (err) {
-    console.error('[ERRO] Falha ao ler songs:', err);
-    res.status(500).json({ error: 'Erro ao ler diretório de músicas' });
+    console.error('[ERRO] Falha ao ler biblioteca:', err);
+    res.status(500).json({ error: 'Erro ao ler biblioteca de músicas' });
   }
 });
 
-// --- STREAM / DOWNLOAD ---
-app.get('/songs/:file', authmiddleware, (req, res) => {
-  streamsong(req, res, req.params.file, false);
+/**
+ * GET /artists
+ * Retorna lista simples de artistas
+ */
+app.get('/artists', authmiddleware, (req, res) => {
+  try {
+    const artists = fs.readdirSync(SONGS_DIR, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+    res.json(artists);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao ler artistas' });
+  }
 });
 
-app.get('/songs/:file/download', authmiddleware, (req, res) => {
-  streamsong(req, res, req.params.file, true);
+/**
+ * GET /albums/:artist
+ * Retorna os álbuns de um artista
+ */
+app.get('/albums/:artist', authmiddleware, (req, res) => {
+  try {
+    const artist = path.basename(req.params.artist);
+    const artistPath = path.resolve(SONGS_DIR, artist);
+
+    if (!artistPath.startsWith(SONGS_DIR) || !fs.existsSync(artistPath)) {
+      return res.status(404).json({ error: 'Artista não encontrado' });
+    }
+
+    const albums = fs.readdirSync(artistPath, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+
+    res.json(albums);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao ler álbuns' });
+  }
 });
 
-function streamsong(req, res, filename, download = false) {
-  // 1. Sanitização contra Path Traversal
-  const safeName = path.basename(filename);
-  const songPath = path.resolve(SONGS_DIR, safeName);
+/**
+ * GET /songs/:artist/:album
+ * Retorna as músicas de um álbum
+ */
+app.get('/songs/:artist/:album', authmiddleware, (req, res) => {
+  try {
+    const artist = path.basename(req.params.artist);
+    const album = path.basename(req.params.album);
+    const albumPath = path.resolve(SONGS_DIR, artist, album);
+
+    if (!albumPath.startsWith(SONGS_DIR) || !fs.existsSync(albumPath)) {
+      return res.status(404).json({ error: 'Álbum não encontrado' });
+    }
+
+    const songs = fs.readdirSync(albumPath)
+      .filter(f => f.endsWith('.mp3'));
+
+    res.json(songs);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao ler músicas' });
+  }
+});
+
+/**
+ * GET /cover/:artist/:album
+ * Retorna a imagem de capa do álbum (cover.jpg, cover.png, folder.jpg, etc.)
+ */
+app.get('/cover/:artist/:album', authmiddleware, (req, res) => {
+  try {
+    const artist = path.basename(req.params.artist);
+    const album = path.basename(req.params.album);
+    const albumPath = path.resolve(SONGS_DIR, artist, album);
+
+    if (!albumPath.startsWith(SONGS_DIR) || !fs.existsSync(albumPath)) {
+      return res.status(404).json({ error: 'Álbum não encontrado' });
+    }
+
+    // Procura por arquivos de capa comuns
+    const possibleCovers = ['cover.jpg', 'cover.jpeg', 'cover.png', 'folder.jpg', 'folder.jpeg', 'folder.png', 'artwork.jpg', 'artwork.jpeg', 'artwork.png'];
+    let coverPath = null;
+
+    for (const coverName of possibleCovers) {
+      const testPath = path.join(albumPath, coverName);
+      if (fs.existsSync(testPath)) {
+        coverPath = testPath;
+        break;
+      }
+    }
+
+    if (!coverPath) {
+      return res.status(404).json({ error: 'Capa não encontrada' });
+    }
+
+    const ext = path.extname(coverPath).toLowerCase();
+    const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
+
+    res.setHeader('Content-Type', mimeType);
+    const stream = fs.createReadStream(coverPath);
+    stream.pipe(res);
+    stream.on('error', (err) => {
+      if (!res.headersSent) res.sendStatus(500);
+    });
+    res.on('close', () => stream.destroy());
+
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao ler capa' });
+  }
+});
+
+/**
+ * GET /stream/:artist/:album/:file
+ * Stream de uma música específica
+ */
+app.get('/stream/:artist/:album/:file', authmiddleware, (req, res) => {
+  const artist = path.basename(req.params.artist);
+  const album = path.basename(req.params.album);
+  const filename = path.basename(req.params.file);
+  streamsong(req, res, artist, album, filename);
+});
+
+/**
+ * GET /download/:artist/:album/:file
+ * Download de uma música
+ */
+app.get('/download/:artist/:album/:file', authmiddleware, (req, res) => {
+  const artist = path.basename(req.params.artist);
+  const album = path.basename(req.params.album);
+  const filename = path.basename(req.params.file);
+  streamsong(req, res, artist, album, filename, true);
+});
+
+// ============================================
+// FUNÇÃO DE STREAMING
+// ============================================
+function streamsong(req, res, artist, album, filename, download = false) {
+  const songPath = path.resolve(SONGS_DIR, artist, album, filename);
 
   if (!songPath.startsWith(SONGS_DIR)) {
     return res.status(403).json({ error: 'Forbidden' });
@@ -108,21 +265,18 @@ function streamsong(req, res, filename, download = false) {
   const stat = fs.statSync(songPath);
   const fileSize = stat.size;
 
-  // 2. Download direto
   if (download) {
-    res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Type', 'audio/mpeg');
     const stream = fs.createReadStream(songPath);
     stream.pipe(res);
     stream.on('error', (err) => {
-      console.error('[ERRO Stream download]', err.message);
       if (!res.headersSent) res.sendStatus(500);
     });
     res.on('close', () => stream.destroy());
     return;
   }
 
-  // 3. Streaming com suporte a HTTP Range (permite seek no player)
   const range = req.headers.range;
 
   if (range) {
@@ -147,14 +301,12 @@ function streamsong(req, res, filename, download = false) {
 
     stream.pipe(res);
     stream.on('error', (err) => {
-      console.error('[ERRO Stream range]', err.message);
       if (!res.headersSent) res.sendStatus(500);
     });
     res.on('close', () => stream.destroy());
     return;
   }
 
-  // 4. Streaming sem Range (primeira requisição)
   res.setHeader('Content-Type', 'audio/mpeg');
   res.setHeader('Content-Length', fileSize);
   res.setHeader('Accept-Ranges', 'bytes');
@@ -162,7 +314,6 @@ function streamsong(req, res, filename, download = false) {
   const stream = fs.createReadStream(songPath);
   stream.pipe(res);
   stream.on('error', (err) => {
-    console.error('[ERRO Stream]', err.message);
     if (!res.headersSent) res.sendStatus(500);
   });
   res.on('close', () => stream.destroy());
