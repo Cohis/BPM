@@ -7,8 +7,6 @@ const jwt = require('jsonwebtoken');
 
 const app = express();
 
-//recriar arquivo do 0 (um dia)
-
 // --- CONFIGURAÇÕES ---
 const PORT = process.env.PORT || 8080;
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -21,7 +19,6 @@ if (!JWT_SECRET) {
   process.exit(1);
 }
 
-// Cria pasta songs se não existir
 if (!fs.existsSync(SONGS_DIR)) {
   fs.mkdirSync(SONGS_DIR, { recursive: true });
   console.log('[INFO] Pasta songs/ criada automaticamente');
@@ -31,7 +28,45 @@ if (!fs.existsSync(SONGS_DIR)) {
 app.use(express.json());
 app.use(cors());
 
-// --- RATE LIMITING SIMPLES (memória) ---
+// --- CACHE DE BIBLIOTECA ---
+// Evita ler o disco toda vez que o app abre
+let libraryCache = null;
+let libraryCacheTime = 0;
+const CACHE_TTL = 30 * 1000; // 30 segundos
+
+function getLibraryFromDisk() {
+  const library = {};
+  const artists = fs.readdirSync(SONGS_DIR, { withFileTypes: true })
+    .filter(d => d.isDirectory())
+    .map(d => d.name);
+
+  for (const artist of artists) {
+    const artistPath = path.join(SONGS_DIR, artist);
+    const albums = fs.readdirSync(artistPath, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+
+    library[artist] = {};
+    for (const album of albums) {
+      const albumPath = path.join(artistPath, album);
+      const files = fs.readdirSync(albumPath)
+        .filter(f => f.endsWith('.mp3'));
+      library[artist][album] = files;
+    }
+  }
+  return library;
+}
+
+function getLibrary() {
+  const now = Date.now();
+  if (!libraryCache || (now - libraryCacheTime) > CACHE_TTL) {
+    libraryCache = getLibraryFromDisk();
+    libraryCacheTime = now;
+  }
+  return libraryCache;
+}
+
+// --- RATE LIMITING ---
 const authAttempts = new Map();
 function rateLimitAuth(req, res, next) {
   const ip = req.ip || req.connection.remoteAddress || 'unknown';
@@ -75,126 +110,77 @@ function authmiddleware(req, res, next) {
 }
 
 // ============================================
-// NOVAS ROTAS COM ESTRUTURA DE PASTAS
+// ROTAS DA API
 // ============================================
 
-/**
- * GET /library
- * Retorna a biblioteca completa como árvore JSON:
- * {
- *   "Deftones": {
- *     "White Pony": ["Change (In the House of Flies).mp3", "Digital Bath.mp3"],
- *     "Around the Fur": ["My Own Summer.mp3"]
- *   },
- *   "The Strokes": { ... }
- * }
- */
 app.get('/library', authmiddleware, (req, res) => {
   try {
-    const library = {};
-    const artists = fs.readdirSync(SONGS_DIR, { withFileTypes: true })
-      .filter(d => d.isDirectory())
-      .map(d => d.name);
-
-    for (const artist of artists) {
-      const artistPath = path.join(SONGS_DIR, artist);
-      const albums = fs.readdirSync(artistPath, { withFileTypes: true })
-        .filter(d => d.isDirectory())
-        .map(d => d.name);
-
-      library[artist] = {};
-
-      for (const album of albums) {
-        const albumPath = path.join(artistPath, album);
-        const files = fs.readdirSync(albumPath)
-          .filter(f => f.endsWith('.mp3'));
-        library[artist][album] = files;
-      }
-    }
-
-    res.json(library);
+    res.json(getLibrary());
   } catch (err) {
     console.error('[ERRO] Falha ao ler biblioteca:', err);
     res.status(500).json({ error: 'Erro ao ler biblioteca de músicas' });
   }
 });
 
-/**
- * GET /artists
- * Retorna lista simples de artistas
- */
 app.get('/artists', authmiddleware, (req, res) => {
   try {
-    const artists = fs.readdirSync(SONGS_DIR, { withFileTypes: true })
-      .filter(d => d.isDirectory())
-      .map(d => d.name);
+    const artists = Object.keys(getLibrary());
     res.json(artists);
   } catch (err) {
     res.status(500).json({ error: 'Erro ao ler artistas' });
   }
 });
 
-/**
- * GET /albums/:artist
- * Retorna os álbuns de um artista
- */
 app.get('/albums/:artist', authmiddleware, (req, res) => {
   try {
     const artist = path.basename(req.params.artist);
-    const artistPath = path.resolve(SONGS_DIR, artist);
-
-    if (!artistPath.startsWith(SONGS_DIR) || !fs.existsSync(artistPath)) {
+    const lib = getLibrary();
+    if (!lib[artist]) {
       return res.status(404).json({ error: 'Artista não encontrado' });
     }
-
-    const albums = fs.readdirSync(artistPath, { withFileTypes: true })
-      .filter(d => d.isDirectory())
-      .map(d => d.name);
-
-    res.json(albums);
+    res.json(Object.keys(lib[artist]));
   } catch (err) {
     res.status(500).json({ error: 'Erro ao ler álbuns' });
   }
 });
 
-/**
- * GET /songs/:artist/:album
- * Retorna as músicas de um álbum
- */
 app.get('/songs/:artist/:album', authmiddleware, (req, res) => {
   try {
     const artist = path.basename(req.params.artist);
     const album = path.basename(req.params.album);
-    const albumPath = path.resolve(SONGS_DIR, artist, album);
-
-    if (!albumPath.startsWith(SONGS_DIR) || !fs.existsSync(albumPath)) {
+    const lib = getLibrary();
+    if (!lib[artist] || !lib[artist][album]) {
       return res.status(404).json({ error: 'Álbum não encontrado' });
     }
-
-    const songs = fs.readdirSync(albumPath)
-      .filter(f => f.endsWith('.mp3'));
-
-    res.json(songs);
+    res.json(lib[artist][album]);
   } catch (err) {
     res.status(500).json({ error: 'Erro ao ler músicas' });
   }
 });
 
-/**
- * GET /cover/:artist/:album
- * Retorna a imagem de capa do álbum (cover.jpg, cover.png, folder.jpg, etc.)
- */
+// --- CACHE DE CAPAS (em memória) ---
+const coverCache = new Map();
+const COVER_MAX_AGE = 5 * 60 * 1000; // 5 minutos
+
 app.get('/cover/:artist/:album', authmiddleware, (req, res) => {
   try {
     const artist = path.basename(req.params.artist);
     const album = path.basename(req.params.album);
-    const albumPath = path.resolve(SONGS_DIR, artist, album);
+    const cacheKey = `${artist}/${album}`;
+    const cached = coverCache.get(cacheKey);
 
+    // Se tem cache válido, usa
+    if (cached && (Date.now() - cached.time) < COVER_MAX_AGE) {
+      res.setHeader('Content-Type', cached.mimeType);
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      return res.send(cached.buffer);
+    }
+
+    const albumPath = path.resolve(SONGS_DIR, artist, album);
     if (!albumPath.startsWith(SONGS_DIR) || !fs.existsSync(albumPath)) {
       return res.status(404).json({ error: 'Álbum não encontrado' });
     }
 
-    // Procura por arquivos de capa comuns
     const possibleCovers = ['cover.jpg', 'cover.jpeg', 'cover.png', 'folder.jpg', 'folder.jpeg', 'folder.png', 'artwork.jpg', 'artwork.jpeg', 'artwork.png'];
     let coverPath = null;
 
@@ -213,23 +199,29 @@ app.get('/cover/:artist/:album', authmiddleware, (req, res) => {
     const ext = path.extname(coverPath).toLowerCase();
     const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
 
+    // Lê a capa em buffer e cacheia
+    const buffer = fs.readFileSync(coverPath);
+    coverCache.set(cacheKey, { buffer, mimeType, time: Date.now() });
+
     res.setHeader('Content-Type', mimeType);
-    const stream = fs.createReadStream(coverPath);
-    stream.pipe(res);
-    stream.on('error', (err) => {
-      if (!res.headersSent) res.sendStatus(500);
-    });
-    res.on('close', () => stream.destroy());
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.send(buffer);
 
   } catch (err) {
     res.status(500).json({ error: 'Erro ao ler capa' });
   }
 });
 
+// ============================================
+// STREAMING OTIMIZADO
+// ============================================
+
 /**
- * GET /stream/:artist/:album/:file
- * Stream de uma música específica
+ * Buffer maior para streaming = menos operações de I/O = mais velocidade
+ * Padrão do Node.js: 64KB. Para MP3, 256KB é ideal (menor overhead).
  */
+const STREAM_BUFFER_SIZE = 256 * 1024; // 256KB
+
 app.get('/stream/:artist/:album/:file', authmiddleware, (req, res) => {
   const artist = path.basename(req.params.artist);
   const album = path.basename(req.params.album);
@@ -237,10 +229,6 @@ app.get('/stream/:artist/:album/:file', authmiddleware, (req, res) => {
   streamsong(req, res, artist, album, filename);
 });
 
-/**
- * GET /download/:artist/:album/:file
- * Download de uma música
- */
 app.get('/download/:artist/:album/:file', authmiddleware, (req, res) => {
   const artist = path.basename(req.params.artist);
   const album = path.basename(req.params.album);
@@ -248,9 +236,6 @@ app.get('/download/:artist/:album/:file', authmiddleware, (req, res) => {
   streamsong(req, res, artist, album, filename, true);
 });
 
-// ============================================
-// FUNÇÃO DE STREAMING
-// ============================================
 function streamsong(req, res, artist, album, filename, download = false) {
   const songPath = path.resolve(SONGS_DIR, artist, album, filename);
 
@@ -265,18 +250,21 @@ function streamsong(req, res, artist, album, filename, download = false) {
   const stat = fs.statSync(songPath);
   const fileSize = stat.size;
 
+  // Download direto
   if (download) {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Type', 'audio/mpeg');
-    const stream = fs.createReadStream(songPath);
+    const stream = fs.createReadStream(songPath, { highWaterMark: STREAM_BUFFER_SIZE });
     stream.pipe(res);
     stream.on('error', (err) => {
+      console.error('[ERRO Stream download]', err.message);
       if (!res.headersSent) res.sendStatus(500);
     });
     res.on('close', () => stream.destroy());
     return;
   }
 
+  // Streaming com Range (seek)
   const range = req.headers.range;
 
   if (range) {
@@ -290,30 +278,40 @@ function streamsong(req, res, artist, album, filename, download = false) {
     }
 
     const chunkSize = (end - start) + 1;
-    const stream = fs.createReadStream(songPath, { start, end });
+    // Buffer maior = chunks maiores enviados de uma vez
+    const stream = fs.createReadStream(songPath, { 
+      start, 
+      end,
+      highWaterMark: STREAM_BUFFER_SIZE 
+    });
 
     res.writeHead(206, {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
       'Accept-Ranges': 'bytes',
       'Content-Length': chunkSize,
       'Content-Type': 'audio/mpeg',
+      'Cache-Control': 'public, max-age=86400', // Cache de 1 dia para chunks
     });
 
     stream.pipe(res);
     stream.on('error', (err) => {
+      console.error('[ERRO Stream range]', err.message);
       if (!res.headersSent) res.sendStatus(500);
     });
     res.on('close', () => stream.destroy());
     return;
   }
 
+  // Streaming sem Range (primeira requisição)
   res.setHeader('Content-Type', 'audio/mpeg');
   res.setHeader('Content-Length', fileSize);
   res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
 
-  const stream = fs.createReadStream(songPath);
+  const stream = fs.createReadStream(songPath, { highWaterMark: STREAM_BUFFER_SIZE });
   stream.pipe(res);
   stream.on('error', (err) => {
+    console.error('[ERRO Stream]', err.message);
     if (!res.headersSent) res.sendStatus(500);
   });
   res.on('close', () => stream.destroy());
@@ -321,7 +319,7 @@ function streamsong(req, res, artist, album, filename, download = false) {
 
 // --- HEALTH CHECK ---
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
+  res.json({ status: 'ok', uptime: process.uptime(), cacheSize: coverCache.size });
 });
 
 // --- 404 GLOBAL ---
@@ -333,4 +331,5 @@ app.use((req, res) => {
 app.listen(PORT, () => {
   console.log(`[HeartBeat] Server running at port ${PORT}`);
   console.log(`[HeartBeat] Songs dir: ${SONGS_DIR}`);
+  console.log(`[HeartBeat] Stream buffer: ${STREAM_BUFFER_SIZE / 1024}KB`);
 });

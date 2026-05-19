@@ -153,16 +153,6 @@ function PlayerFullScreen({
 
       <View style={styles.discoContainer}>
         <Image source={{ uri: song.coverUrl }} style={styles.discoImagem} />
-        <TouchableOpacity
-          style={styles.discoPlayCentral}
-          onPress={onTogglePlayPause}
-        >
-          <Ionicons
-            name={statusToca?.isPlaying ? "pause" : "play"}
-            size={24}
-            color={Cores.pretoPlayer}
-          />
-        </TouchableOpacity>
       </View>
 
       <View style={styles.fullInfoMusica}>
